@@ -1,11 +1,15 @@
 package com.example.beaconpass.features.attendance.data
 
 import com.example.beaconpass.core.network.AttendanceRpcResponse
+import com.example.beaconpass.core.network.SessionInfo
 import com.example.beaconpass.core.network.SupabaseNetworkClient
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.rpc
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.time.Instant
 
 class AttendanceRepository {
 
@@ -32,6 +36,22 @@ class AttendanceRepository {
                 function = "mark_attendance_secure",
                 parameters = params
             ).decodeAs<AttendanceRpcResponse>()
+        }
+    }
+
+    // In AttendanceRepository.kt
+    suspend fun getActiveSession(courseCode: String = "CS-402"): Result<String> = withContext(
+        Dispatchers.IO) {
+        runCatching {
+            val sessions = postgrest.from("attendance_sessions")
+                .select {
+                    filter {
+                        eq("is_active", true)
+                        gt("expires_at", Instant.now().toString())
+                    }
+                }.decodeList<SessionInfo>()
+
+            sessions.firstOrNull()?.id ?: throw IllegalStateException("No active attendance window for $courseCode.")
         }
     }
 }

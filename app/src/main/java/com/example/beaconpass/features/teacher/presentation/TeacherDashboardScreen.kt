@@ -1,27 +1,34 @@
 package com.example.beaconpass.features.teacher.presentation
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import com.example.beaconpass.features.teacher.data.TeacherRepository
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 data class LiveStudentEntry(
     val rollNo: String,
@@ -37,19 +44,34 @@ fun TeacherDashboardScreen(
     facultyEmail: String,
     onLogout: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val teacherRepository = remember { TeacherRepository() }
+
     var isSessionActive by remember { mutableStateOf(false) }
-    var selectedDuration by remember { mutableStateOf(120) } // Using mutableStateOf for universal compatibility
+    var activeSessionId by remember { mutableStateOf<String?>(null) }
+    var isStartingSession by remember { mutableStateOf(false) }
+    var selectedDuration by remember { mutableStateOf(120) }
     var remainingTime by remember { mutableStateOf(120) }
 
-    val attendedStudents = remember {
-        mutableStateListOf(
-            LiveStudentEntry("2023CS01", "Aarav Sharma", "03:45:12 PM", -58),
-            LiveStudentEntry("2023CS02", "Ananya Verma", "03:45:18 PM", -62),
-            LiveStudentEntry("2023CS04", "Rohan Gupta", "03:45:25 PM", -55),
-            LiveStudentEntry("2023CS09", "Priya Singh", "03:45:31 PM", -64)
-        )
+    val listState = rememberLazyListState()
+    val attendedStudents = remember { mutableStateListOf<LiveStudentEntry>() }
+
+    // Realtime WebSocket Collector: triggers when activeSessionId is set
+    LaunchedEffect(activeSessionId) {
+        val currentId = activeSessionId
+        if (currentId != null) {
+            teacherRepository.subscribeToLiveAttendance(currentId)
+                .collectLatest { liveStudent ->
+                    // Prevent UI duplicates if WebSocket re-emits
+                    if (attendedStudents.none { it.rollNo == liveStudent.rollNo }) {
+                        attendedStudents.add(0, liveStudent)
+                    }
+                }
+        }
     }
 
+    // Countdown Timer logic: automatically closes session on 0s
     LaunchedEffect(isSessionActive) {
         if (isSessionActive) {
             remainingTime = selectedDuration
@@ -58,7 +80,9 @@ fun TeacherDashboardScreen(
                 remainingTime--
             }
             if (remainingTime <= 0) {
+                activeSessionId?.let { teacherRepository.stopAttendanceSession(it) }
                 isSessionActive = false
+                activeSessionId = null
             }
         }
     }
@@ -82,11 +106,12 @@ fun TeacherDashboardScreen(
         }
     ) { padding ->
         LazyColumn(
+            state = listState, // Fixed: listState passed properly
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFFF8FAFC))
-                .padding(padding)
-                .padding(horizontal = 20.dp),
+                .padding(padding),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
@@ -133,7 +158,7 @@ fun TeacherDashboardScreen(
                             listOf(60, 120, 180).forEach { sec ->
                                 FilterChip(
                                     selected = selectedDuration == sec,
-                                    onClick = { if (!isSessionActive) selectedDuration = sec },
+                                    onClick = { if (!isSessionActive && !isStartingSession) selectedDuration = sec },
                                     label = { Text("${sec}s") },
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = Color(0xFF2563EB),
@@ -146,7 +171,31 @@ fun TeacherDashboardScreen(
                         Spacer(modifier = Modifier.height(16.dp))
 
                         Button(
-                            onClick = { isSessionActive = !isSessionActive },
+                            onClick = {
+                                if (!isSessionActive) {
+                                    isStartingSession = true
+                                    scope.launch {
+                                        attendedStudents.clear()
+                                        val result = teacherRepository.startAttendanceSession(
+                                            durationSeconds = selectedDuration
+                                        )
+                                        isStartingSession = false
+                                        result.onSuccess { sessionId ->
+                                            activeSessionId = sessionId
+                                            isSessionActive = true
+                                        }.onFailure { error ->
+                                            Toast.makeText(context, "Error starting session: ${error.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } else {
+                                    scope.launch {
+                                        activeSessionId?.let { teacherRepository.stopAttendanceSession(it) }
+                                        isSessionActive = false
+                                        activeSessionId = null
+                                    }
+                                }
+                            },
+                            enabled = !isStartingSession, // Prevents multiple fast taps
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp),
@@ -155,16 +204,20 @@ fun TeacherDashboardScreen(
                                 containerColor = if (isSessionActive) Color(0xFFEF4444) else Color(0xFF2563EB)
                             )
                         ) {
-                            Icon(
-                                if (isSessionActive) Icons.Default.Close else Icons.Default.PlayArrow,
-                                contentDescription = null
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (isSessionActive) "Stop Broadcast Window" else "Open Attendance Window",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
+                            if (isStartingSession) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                            } else {
+                                Icon(
+                                    if (isSessionActive) Icons.Default.Close else Icons.Default.PlayArrow,
+                                    contentDescription = null
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isSessionActive) "Stop Broadcast Window" else "Open Attendance Window",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
                         }
                     }
                 }
@@ -207,7 +260,7 @@ fun TeacherDashboardScreen(
                                     color = Color.White
                                 )
                                 Text(
-                                    text = "ESP32 Broadcasting TOTP...",
+                                    text = "Receiving live presence confirmations...",
                                     color = Color(0xFF94A3B8),
                                     fontSize = 12.sp
                                 )
@@ -245,7 +298,7 @@ fun TeacherDashboardScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Real-Time Incoming Stream",
+                        text = "Real-Time Incoming Stream (${attendedStudents.size})",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF0F172A)
@@ -258,7 +311,41 @@ fun TeacherDashboardScreen(
                 }
             }
 
-            items(attendedStudents) { student ->
+            // Empty state placeholder
+            if (attendedStudents.isEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(12.dp)),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                Icons.Default.Sensors,
+                                contentDescription = null,
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (isSessionActive) "Waiting for students to verify presence..." else "No active attendance session",
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFF64748B),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            items(attendedStudents, key = { it.rollNo }) { student ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -320,7 +407,7 @@ fun TeacherDashboardScreen(
             }
 
             item {
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(32.dp))
             }
         }
     }

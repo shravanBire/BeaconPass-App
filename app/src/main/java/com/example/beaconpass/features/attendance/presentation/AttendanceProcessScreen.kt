@@ -181,34 +181,45 @@ fun AttendanceProcessScreen(
                             val beacon = state.verifiedBeacon
                             currentState = AttendanceStepState.Submitting
 
-                            // Server Verification Call via Atomic RPC
                             scope.launch {
-                                val result = attendanceRepository.submitAttendance(
-                                    sessionId = "33333333-3333-3333-3333-333333333333", // Active Room 402 Session
-                                    token = beacon.rotatingToken,
-                                    rssi = beacon.trimmedRssi,
-                                    deviceId = deviceFingerprint
-                                )
+                                // 1. Fetch live active session created by teacher
+                                val sessionResult = attendanceRepository.getActiveSession("CS-402")
 
-                                result.onSuccess { rpcRes ->
-                                    if (rpcRes.success) {
-                                        currentState = AttendanceStepState.SuccessReceipt(
-                                            room = rpcRes.room ?: "CS-402",
-                                            rssi = beacon.trimmedRssi,
-                                            token = beacon.rotatingToken,
-                                            timestamp = rpcRes.verifiedAt?.take(19)?.replace("T", " ") ?: "Verified Just Now"
-                                        )
-                                    } else {
+                                sessionResult.onSuccess { activeId ->
+                                    // 2. Submit attendance using dynamic active session ID
+                                    val result = attendanceRepository.submitAttendance(
+                                        sessionId = activeId,
+                                        token = beacon.rotatingToken,
+                                        rssi = beacon.trimmedRssi,
+                                        deviceId = deviceFingerprint
+                                    )
+
+                                    result.onSuccess { rpcRes ->
+                                        if (rpcRes.success) {
+                                            currentState = AttendanceStepState.SuccessReceipt(
+                                                room = rpcRes.room ?: "CS-402",
+                                                rssi = beacon.trimmedRssi,
+                                                token = beacon.rotatingToken,
+                                                timestamp = rpcRes.verifiedAt?.take(19)?.replace("T", " ") ?: "Verified Just Now"
+                                            )
+                                        } else {
+                                            currentState = AttendanceStepState.ScanFailed(
+                                                title = "Verification Rejected",
+                                                message = rpcRes.message,
+                                                isOutOfBounds = rpcRes.error == "OUT_OF_BOUNDS"
+                                            )
+                                        }
+                                    }.onFailure { error ->
                                         currentState = AttendanceStepState.ScanFailed(
-                                            title = "Verification Rejected",
-                                            message = rpcRes.message,
-                                            isOutOfBounds = rpcRes.error == "OUT_OF_BOUNDS"
+                                            title = "Submission Error",
+                                            message = error.localizedMessage ?: "Failed to record attendance.",
+                                            isOutOfBounds = false
                                         )
                                     }
-                                }.onFailure { error ->
+                                }.onFailure { noSessionError ->
                                     currentState = AttendanceStepState.ScanFailed(
-                                        title = "Network Error",
-                                        message = error.localizedMessage ?: "Failed to reach Supabase server.",
+                                        title = "No Active Session",
+                                        message = noSessionError.localizedMessage ?: "Teacher has not opened the attendance window yet.",
                                         isOutOfBounds = false
                                     )
                                 }

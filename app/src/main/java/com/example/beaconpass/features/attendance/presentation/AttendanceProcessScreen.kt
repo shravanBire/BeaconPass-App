@@ -36,14 +36,17 @@ import androidx.core.content.ContextCompat
 import com.example.beaconpass.core.ble.BleAttendanceScanner
 import com.example.beaconpass.core.ble.BleScanStatus
 import com.example.beaconpass.core.ble.VerifiedBeaconResult
-import kotlinx.coroutines.delay
+import com.example.beaconpass.core.security.DeviceFingerprint
 import com.example.beaconpass.core.vision.CameraViewfinder
 import com.example.beaconpass.core.vision.FaceLivenessAnalyzer
+import com.example.beaconpass.features.attendance.data.AttendanceRepository
+import kotlinx.coroutines.launch
 
 sealed class AttendanceStepState {
     object BleScanning : AttendanceStepState()
     data class ScanFailed(val title: String, val message: String, val isOutOfBounds: Boolean) : AttendanceStepState()
     data class FaceLiveness(val verifiedBeacon: VerifiedBeaconResult, val promptText: String) : AttendanceStepState()
+    object Submitting : AttendanceStepState() // Server verification state
     data class SuccessReceipt(val room: String, val rssi: Double, val token: Long, val timestamp: String) : AttendanceStepState()
 }
 
@@ -53,13 +56,15 @@ fun AttendanceProcessScreen(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var currentState by remember { mutableStateOf<AttendanceStepState>(AttendanceStepState.BleScanning) }
 
-    // Bluetooth Hardware Adapter
+    val attendanceRepository = remember { AttendanceRepository() }
+    val deviceFingerprint = remember { DeviceFingerprint.getHardwareFingerprint(context) }
+
     val bluetoothManager = remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
     val bleScanner = remember { BleAttendanceScanner(bluetoothManager?.adapter) }
 
-    // Required Permissions array based on Android version
     val requiredPermissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
@@ -78,7 +83,6 @@ fun AttendanceProcessScreen(
         }
     }
 
-    // Function to initiate real BLE burst scan
     val triggerRealBleScan: () -> Unit = {
         currentState = AttendanceStepState.BleScanning
         bleScanner.startBurstScan { status ->
@@ -87,14 +91,12 @@ fun AttendanceProcessScreen(
                     currentState = AttendanceStepState.BleScanning
                 }
                 is BleScanStatus.Success -> {
-                    // Real ESP32 detected & inside room! Transition to Step 2[cite: 1, 2]
                     currentState = AttendanceStepState.FaceLiveness(
                         verifiedBeacon = status.result,
-                        promptText = "Action Required: Blink both eyes"
+                        promptText = "Action Required: Blink both eyes slowly"
                     )
                 }
                 is BleScanStatus.OutOfBounds -> {
-                    // Signal too weak (door/wall barrier)[cite: 1, 2]
                     currentState = AttendanceStepState.ScanFailed(
                         title = "Outside Classroom Boundary",
                         message = "Signal strength (%.1f dBm) indicates you are outside Room 402. Attendance rejected.".format(status.avgRssi),
@@ -120,23 +122,20 @@ fun AttendanceProcessScreen(
         }
     }
 
-    // Permission Launcher
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
-        val allGranted = perms.values.all { it }
-        if (allGranted) {
+        if (perms.values.all { it }) {
             triggerRealBleScan()
         } else {
             currentState = AttendanceStepState.ScanFailed(
                 title = "Permission Required",
-                message = "Bluetooth and Location permissions are required to detect classroom presence.",
+                message = "Camera, Bluetooth, and Location are mandatory to verify physical presence.",
                 isOutOfBounds = false
             )
         }
     }
 
-    // Auto-check permissions and trigger real scan on entry
     LaunchedEffect(Unit) {
         val hasPermissions = requiredPermissions.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
@@ -147,20 +146,6 @@ fun AttendanceProcessScreen(
             permissionLauncher.launch(requiredPermissions)
         }
     }
-
-    // Step 2 Face Liveness Simulation (until we build CameraX ML Kit in Milestone 3)[cite: 1, 2]
-//    LaunchedEffect(currentState) {
-//        if (currentState is AttendanceStepState.FaceLiveness) {
-//            val beaconData = (currentState as AttendanceStepState.FaceLiveness).verifiedBeacon
-//            delay(3000) // 3s temporary delay for liveness
-//            currentState = AttendanceStepState.SuccessReceipt(
-//                room = "CS-402",
-//                rssi = beaconData.trimmedRssi,
-//                token = beaconData.rotatingToken,
-//                timestamp = "Today, Realtime Sync"
-//            )
-//        }
-//    }
 
     Scaffold(
         topBar = {
@@ -189,20 +174,49 @@ fun AttendanceProcessScreen(
                 when (state) {
                     is AttendanceStepState.BleScanning -> BleScanningView()
 
-                    // Fixed FaceLiveness Call:
                     is AttendanceStepState.FaceLiveness -> FaceLivenessView(
                         rssi = state.verifiedBeacon.trimmedRssi.toInt(),
                         token = state.verifiedBeacon.rotatingToken,
                         onLivenessSuccess = {
-                            val beaconData = state.verifiedBeacon
-                            currentState = AttendanceStepState.SuccessReceipt(
-                                room = "CS-402",
-                                rssi = beaconData.trimmedRssi,
-                                token = beaconData.rotatingToken,
-                                timestamp = "Today, Realtime Sync"
-                            )
+                            val beacon = state.verifiedBeacon
+                            currentState = AttendanceStepState.Submitting
+
+                            // Server Verification Call via Atomic RPC
+                            scope.launch {
+                                val result = attendanceRepository.submitAttendance(
+                                    sessionId = "33333333-3333-3333-3333-333333333333", // Active Room 402 Session
+                                    token = beacon.rotatingToken,
+                                    rssi = beacon.trimmedRssi,
+                                    deviceId = deviceFingerprint
+                                )
+
+                                result.onSuccess { rpcRes ->
+                                    if (rpcRes.success) {
+                                        currentState = AttendanceStepState.SuccessReceipt(
+                                            room = rpcRes.room ?: "CS-402",
+                                            rssi = beacon.trimmedRssi,
+                                            token = beacon.rotatingToken,
+                                            timestamp = rpcRes.verifiedAt?.take(19)?.replace("T", " ") ?: "Verified Just Now"
+                                        )
+                                    } else {
+                                        currentState = AttendanceStepState.ScanFailed(
+                                            title = "Verification Rejected",
+                                            message = rpcRes.message,
+                                            isOutOfBounds = rpcRes.error == "OUT_OF_BOUNDS"
+                                        )
+                                    }
+                                }.onFailure { error ->
+                                    currentState = AttendanceStepState.ScanFailed(
+                                        title = "Network Error",
+                                        message = error.localizedMessage ?: "Failed to reach Supabase server.",
+                                        isOutOfBounds = false
+                                    )
+                                }
+                            }
                         }
                     )
+
+                    is AttendanceStepState.Submitting -> SubmittingView()
 
                     is AttendanceStepState.SuccessReceipt -> SuccessReceiptView(
                         room = state.room,
@@ -211,6 +225,7 @@ fun AttendanceProcessScreen(
                         timestamp = state.timestamp,
                         onDone = onDismiss
                     )
+
                     is AttendanceStepState.ScanFailed -> ScanFailedView(
                         title = state.title,
                         message = state.message,
@@ -223,9 +238,34 @@ fun AttendanceProcessScreen(
         }
     }
 }
-// ----------------------------------------------------
-// FAILURE / BOUNDARY ERROR VIEW[cite: 1, 2]
-// ----------------------------------------------------
+
+@Composable
+fun SubmittingView() {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(56.dp),
+            strokeWidth = 4.dp,
+            color = Color(0xFF2563EB)
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Text(
+            text = "Validating Presence...",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF0F172A)
+        )
+        Text(
+            text = "Executing atomic token and device lock verification",
+            fontSize = 12.sp,
+            color = Color(0xFF64748B),
+            modifier = Modifier.padding(top = 4.dp)
+        )
+    }
+}
+
 @Composable
 fun ScanFailedView(
     title: String,

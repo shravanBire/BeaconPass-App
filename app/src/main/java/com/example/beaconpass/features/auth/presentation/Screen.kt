@@ -6,8 +6,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -23,25 +23,27 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.beaconpass.core.network.UserProfile
 import com.example.beaconpass.core.security.DeviceFingerprint
-
-enum class UserRole {
-    STUDENT, TEACHER
-}
+import com.example.beaconpass.features.auth.data.AuthRepository
+import com.example.beaconpass.features.auth.data.AuthResult
+import kotlinx.coroutines.launch
 
 @Composable
 fun LoginScreen(
-    onLoginSuccess: (role: UserRole, identifier: String, deviceId: String) -> Unit
+    onLoginSuccess: (profile: UserProfile) -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val authRepository = remember { AuthRepository() }
 
-    var identifier by remember { mutableStateOf("") } // Roll No ya Email
+    var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-    var selectedRole by remember { mutableStateOf(UserRole.STUDENT) }
+    var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    // Hardware device ID fetch karna
+    // Physical Hardware Signature
     val deviceFingerprint = remember {
         DeviceFingerprint.getHardwareFingerprint(context)
     }
@@ -58,9 +60,8 @@ fun LoginScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(36.dp))
 
-            // App Logo / Title
             Text(
                 text = "BEACONPASS",
                 fontSize = 26.sp,
@@ -75,71 +76,20 @@ fun LoginScreen(
                 modifier = Modifier.padding(top = 4.dp)
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(40.dp))
 
-            // Role Toggle (Student vs Teacher)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .background(Color(0xFFE2E8F0), RoundedCornerShape(24.dp))
-                    .padding(4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(
-                            if (selectedRole == UserRole.STUDENT) Color(0xFF2563EB) else Color.Transparent,
-                            RoundedCornerShape(20.dp)
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    TextButton(onClick = { selectedRole = UserRole.STUDENT }) {
-                        Text(
-                            text = "Student",
-                            color = if (selectedRole == UserRole.STUDENT) Color.White else Color(0xFF475569),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(
-                            if (selectedRole == UserRole.TEACHER) Color(0xFF2563EB) else Color.Transparent,
-                            RoundedCornerShape(20.dp)
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    TextButton(onClick = { selectedRole = UserRole.TEACHER }) {
-                        Text(
-                            text = "Teacher",
-                            color = if (selectedRole == UserRole.TEACHER) Color.White else Color(0xFF475569),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Roll Number / Email Input
+            // Email Input
             OutlinedTextField(
-                value = identifier,
-                onValueChange = { identifier = it },
-                label = {
-                    Text(if (selectedRole == UserRole.STUDENT) "College Roll Number" else "Faculty Email")
-                },
+                value = email,
+                onValueChange = { email = it },
+                label = { Text("Institutional Email") },
                 leadingIcon = {
-                    Icon(Icons.Default.Person, contentDescription = null, tint = Color(0xFF64748B))
+                    Icon(Icons.Default.Email, contentDescription = null, tint = Color(0xFF64748B))
                 },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
-                singleLine = true
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -171,39 +121,68 @@ fun LoginScreen(
                 Text(
                     text = errorMessage!!,
                     color = Color(0xFFEF4444),
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(top = 8.dp)
+                    fontSize = 12.5.sp,
+                    modifier = Modifier.padding(top = 10.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
-            // Primary CTA Button
+            // Sign In Button with Loading State
             Button(
                 onClick = {
-                    if (identifier.isBlank() || password.isBlank()) {
-                        errorMessage = "Please enter both credentials."
-                    } else {
-                        errorMessage = null
-                        onLoginSuccess(selectedRole, identifier, deviceFingerprint)
+                    if (email.isBlank() || password.isBlank()) {
+                        errorMessage = "Please enter both email and password."
+                        return@Button
+                    }
+                    isLoading = true
+                    errorMessage = null
+
+                    scope.launch {
+                        val result = authRepository.signInAndVerifyDevice(
+                            email = email.trim(),
+                            pass = password.trim(),
+                            currentDeviceId = deviceFingerprint
+                        )
+                        isLoading = false
+                        when (result) {
+                            is AuthResult.Success -> {
+                                onLoginSuccess(result.profile)
+                            }
+                            is AuthResult.DeviceMismatch -> {
+                                errorMessage = result.message
+                            }
+                            is AuthResult.Error -> {
+                                errorMessage = result.message
+                            }
+                        }
                     }
                 },
+                enabled = !isLoading,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
             ) {
-                Text(
-                    text = "Sign In & Bind Device",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = Color.White,
+                        strokeWidth = 2.5.dp
+                    )
+                } else {
+                    Text(
+                        text = "Sign In & Bind Device",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
             }
         }
 
-        // Bottom Security Card (Hardware Keystore Notice)
+        // Hardware Lock Security Card
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -213,7 +192,7 @@ fun LoginScreen(
             shape = RoundedCornerShape(12.dp)
         ) {
             Row(
-                modifier = Modifier.padding(12.dp),
+                modifier = Modifier.padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -224,7 +203,7 @@ fun LoginScreen(
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
-                    text = "Hardware-Locked Security: This device fingerprint (${deviceFingerprint.take(8)}...) will be permanently bound to your roll number to prevent proxy logins[cite: 1, 2].",
+                    text = "Hardware Fingerprint: ${deviceFingerprint.take(12)}... This phone will be bound to your account to block proxies.",
                     fontSize = 11.5.sp,
                     color = Color(0xFF1E3A8A),
                     lineHeight = 16.sp

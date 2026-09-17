@@ -10,7 +10,6 @@ import com.example.beaconpass.core.navigation.Screen
 import com.example.beaconpass.features.attendance.presentation.AttendanceProcessScreen
 import com.example.beaconpass.features.attendance.presentation.StudentDashboardScreen
 import com.example.beaconpass.features.auth.presentation.LoginScreen
-import com.example.beaconpass.features.auth.presentation.UserRole
 import com.example.beaconpass.features.teacher.presentation.TeacherDashboardScreen
 import com.example.beaconpass.ui.theme.BeaconPassTheme
 
@@ -25,16 +24,15 @@ class MainActivity : ComponentActivity() {
                     navController = navController,
                     startDestination = Screen.Login.route
                 ) {
-                    // Login Screen Route
                     composable(Screen.Login.route) {
                         LoginScreen(
-                            onLoginSuccess = { role, identifier, _ ->
-                                if (role == UserRole.STUDENT) {
-                                    navController.navigate(Screen.StudentDashboard.createRoute(identifier)) {
+                            onLoginSuccess = { profile ->
+                                if (profile.role == "student") {
+                                    navController.navigate(Screen.StudentDashboard.createRoute(profile.rollNo)) {
                                         popUpTo(Screen.Login.route) { inclusive = true }
                                     }
                                 } else {
-                                    navController.navigate(Screen.TeacherDashboard.createRoute(identifier)) {
+                                    navController.navigate(Screen.TeacherDashboard.createRoute(profile.name)) {
                                         popUpTo(Screen.Login.route) { inclusive = true }
                                     }
                                 }

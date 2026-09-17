@@ -12,7 +12,7 @@ import io.github.jan.supabase.realtime.realtime
 object SupabaseNetworkClient {
 
     private const val SUPABASE_URL = "https://pjsafgknjnmobgucyaon.supabase.co"
-    private const val SUPABASE_ANON_KEY = "sb_secret_cjujOQ0ISOPF5Nh_6igsAg_tWEzRAWM"
+    private const val SUPABASE_ANON_KEY = ""
 
     val client: SupabaseClient = createSupabaseClient(
         supabaseUrl = SUPABASE_URL,

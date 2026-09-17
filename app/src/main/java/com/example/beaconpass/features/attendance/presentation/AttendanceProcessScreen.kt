@@ -1,5 +1,12 @@
 package com.example.beaconpass.features.attendance.presentation
 
+import android.Manifest
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -13,6 +20,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,16 +28,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.example.beaconpass.core.ble.BleAttendanceScanner
+import com.example.beaconpass.core.ble.BleScanStatus
+import com.example.beaconpass.core.ble.VerifiedBeaconResult
 import kotlinx.coroutines.delay
+import com.example.beaconpass.core.vision.CameraViewfinder
+import com.example.beaconpass.core.vision.FaceLivenessAnalyzer
 
-// Reusable State Machine: Yahi states real BLE & ML Kit ke sath swap hongi
 sealed class AttendanceStepState {
     object BleScanning : AttendanceStepState()
-    data class FaceLiveness(val detectedRssi: Int, val promptText: String) : AttendanceStepState()
-    data class SuccessReceipt(val room: String, val rssi: Int, val timestamp: String) : AttendanceStepState()
+    data class ScanFailed(val title: String, val message: String, val isOutOfBounds: Boolean) : AttendanceStepState()
+    data class FaceLiveness(val verifiedBeacon: VerifiedBeaconResult, val promptText: String) : AttendanceStepState()
+    data class SuccessReceipt(val room: String, val rssi: Double, val token: Long, val timestamp: String) : AttendanceStepState()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,36 +52,121 @@ sealed class AttendanceStepState {
 fun AttendanceProcessScreen(
     onDismiss: () -> Unit
 ) {
-    // Current Step State (Abhi testing ke liye timer se automatically step-by-step switch hoga)
+    val context = LocalContext.current
     var currentState by remember { mutableStateOf<AttendanceStepState>(AttendanceStepState.BleScanning) }
 
-    // Simulation Engine: Baad me sirf yeh Coroutine block hatega aur real sensors attach honge
-    LaunchedEffect(Unit) {
-        // 1. Simulating 3-second BLE burst scan[cite: 1, 2]
-        delay(3000)
-        currentState = AttendanceStepState.FaceLiveness(
-            detectedRssi = -58,
-            promptText = "Action Required: Blink both eyes"
-        )
+    // Bluetooth Hardware Adapter
+    val bluetoothManager = remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
+    val bleScanner = remember { BleAttendanceScanner(bluetoothManager?.adapter) }
 
-        // 2. Simulating 3-second face detection & blink verification[cite: 1, 2]
-        delay(3000)
-        currentState = AttendanceStepState.SuccessReceipt(
-            room = "CS-402",
-            rssi = -58,
-            timestamp = "Today, 03:45 PM"
-        )
+    // Required Permissions array based on Android version
+    val requiredPermissions = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        } else {
+            arrayOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.BLUETOOTH,
+                Manifest.permission.BLUETOOTH_ADMIN
+            )
+        }
     }
+
+    // Function to initiate real BLE burst scan
+    val triggerRealBleScan: () -> Unit = {
+        currentState = AttendanceStepState.BleScanning
+        bleScanner.startBurstScan { status ->
+            when (status) {
+                is BleScanStatus.Scanning -> {
+                    currentState = AttendanceStepState.BleScanning
+                }
+                is BleScanStatus.Success -> {
+                    // Real ESP32 detected & inside room! Transition to Step 2[cite: 1, 2]
+                    currentState = AttendanceStepState.FaceLiveness(
+                        verifiedBeacon = status.result,
+                        promptText = "Action Required: Blink both eyes"
+                    )
+                }
+                is BleScanStatus.OutOfBounds -> {
+                    // Signal too weak (door/wall barrier)[cite: 1, 2]
+                    currentState = AttendanceStepState.ScanFailed(
+                        title = "Outside Classroom Boundary",
+                        message = "Signal strength (%.1f dBm) indicates you are outside Room 402. Attendance rejected.".format(status.avgRssi),
+                        isOutOfBounds = true
+                    )
+                }
+                is BleScanStatus.BeaconNotFound -> {
+                    currentState = AttendanceStepState.ScanFailed(
+                        title = "Beacon Not Detected",
+                        message = status.reason,
+                        isOutOfBounds = false
+                    )
+                }
+                is BleScanStatus.Error -> {
+                    currentState = AttendanceStepState.ScanFailed(
+                        title = "Scanner Error",
+                        message = status.message,
+                        isOutOfBounds = false
+                    )
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    // Permission Launcher
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val allGranted = perms.values.all { it }
+        if (allGranted) {
+            triggerRealBleScan()
+        } else {
+            currentState = AttendanceStepState.ScanFailed(
+                title = "Permission Required",
+                message = "Bluetooth and Location permissions are required to detect classroom presence.",
+                isOutOfBounds = false
+            )
+        }
+    }
+
+    // Auto-check permissions and trigger real scan on entry
+    LaunchedEffect(Unit) {
+        val hasPermissions = requiredPermissions.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
+        if (hasPermissions) {
+            triggerRealBleScan()
+        } else {
+            permissionLauncher.launch(requiredPermissions)
+        }
+    }
+
+    // Step 2 Face Liveness Simulation (until we build CameraX ML Kit in Milestone 3)[cite: 1, 2]
+//    LaunchedEffect(currentState) {
+//        if (currentState is AttendanceStepState.FaceLiveness) {
+//            val beaconData = (currentState as AttendanceStepState.FaceLiveness).verifiedBeacon
+//            delay(3000) // 3s temporary delay for liveness
+//            currentState = AttendanceStepState.SuccessReceipt(
+//                room = "CS-402",
+//                rssi = beaconData.trimmedRssi,
+//                token = beaconData.rotatingToken,
+//                timestamp = "Today, Realtime Sync"
+//            )
+//        }
+//    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = "Attendance Verification",
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Text("Attendance Verification", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 },
                 navigationIcon = {
                     IconButton(onClick = onDismiss) {
@@ -85,28 +185,120 @@ fun AttendanceProcessScreen(
                 .padding(24.dp),
             contentAlignment = Alignment.Center
         ) {
-            AnimatedContent(
-                targetState = currentState,
-                label = "StepTransition"
-            ) { state ->
+            AnimatedContent(targetState = currentState, label = "StepTransition") { state ->
                 when (state) {
                     is AttendanceStepState.BleScanning -> BleScanningView()
-                    is AttendanceStepState.FaceLiveness -> FaceLivenessView(state.detectedRssi, state.promptText)
+
+                    // Fixed FaceLiveness Call:
+                    is AttendanceStepState.FaceLiveness -> FaceLivenessView(
+                        rssi = state.verifiedBeacon.trimmedRssi.toInt(),
+                        token = state.verifiedBeacon.rotatingToken,
+                        onLivenessSuccess = {
+                            val beaconData = state.verifiedBeacon
+                            currentState = AttendanceStepState.SuccessReceipt(
+                                room = "CS-402",
+                                rssi = beaconData.trimmedRssi,
+                                token = beaconData.rotatingToken,
+                                timestamp = "Today, Realtime Sync"
+                            )
+                        }
+                    )
+
                     is AttendanceStepState.SuccessReceipt -> SuccessReceiptView(
                         room = state.room,
                         rssi = state.rssi,
+                        token = state.token,
                         timestamp = state.timestamp,
                         onDone = onDismiss
+                    )
+                    is AttendanceStepState.ScanFailed -> ScanFailedView(
+                        title = state.title,
+                        message = state.message,
+                        isOutOfBounds = state.isOutOfBounds,
+                        onRetry = triggerRealBleScan,
+                        onCancel = onDismiss
                     )
                 }
             }
         }
     }
 }
+// ----------------------------------------------------
+// FAILURE / BOUNDARY ERROR VIEW[cite: 1, 2]
+// ----------------------------------------------------
+@Composable
+fun ScanFailedView(
+    title: String,
+    message: String,
+    isOutOfBounds: Boolean,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(76.dp)
+                .background(Color(0xFFFEE2E2), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.Warning,
+                contentDescription = null,
+                tint = Color(0xFFEF4444),
+                modifier = Modifier.size(46.dp)
+            )
+        }
 
-// ----------------------------------------------------
-// STEP 1: Animated BLE Radar Waves View[cite: 1, 2]
-// ----------------------------------------------------
+        Spacer(modifier = Modifier.height(18.dp))
+
+        Text(
+            text = title,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF0F172A)
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = message,
+            fontSize = 13.sp,
+            color = Color(0xFF64748B),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        Button(
+            onClick = onRetry,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+        ) {
+            Text("Retry Scan", fontWeight = FontWeight.Bold, color = Color.White)
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        OutlinedButton(
+            onClick = onCancel,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("Cancel", fontWeight = FontWeight.Bold, color = Color(0xFF475569))
+        }
+    }
+}
+
 @Composable
 fun BleScanningView() {
     val infiniteTransition = rememberInfiniteTransition(label = "RadarWave")
@@ -141,27 +333,24 @@ fun BleScanningView() {
             letterSpacing = 1.2.sp
         )
         Text(
-            text = "Detecting Classroom Beacon",
-            fontSize = 19.sp,
+            text = "Detecting Physical ESP32 Beacon",
+            fontSize = 18.sp,
             fontWeight = FontWeight.ExtraBold,
             color = Color(0xFF0F172A),
             modifier = Modifier.padding(top = 4.dp, bottom = 36.dp)
         )
 
-        // Pulsing Ripple Radar Canvas
         Box(
             modifier = Modifier.size(220.dp),
             contentAlignment = Alignment.Center
         ) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val radius = size.minDimension / 2
-                // Outer expanding animated ring
                 drawCircle(
                     color = Color(0xFF2563EB).copy(alpha = waveAlpha),
                     radius = radius * waveScale,
                     style = Stroke(width = 4.dp.toPx())
                 )
-                // Mid static boundary circle
                 drawCircle(
                     color = Color(0xFFDBEAFE),
                     radius = radius * 0.65f,
@@ -169,7 +358,6 @@ fun BleScanningView() {
                 )
             }
 
-            // Central Beacon Icon
             Box(
                 modifier = Modifier
                     .size(68.dp)
@@ -189,30 +377,44 @@ fun BleScanningView() {
         Spacer(modifier = Modifier.height(36.dp))
 
         Text(
-            text = "Scanning for Room CS-402...",
-            fontSize = 14.sp,
+            text = "Listening for 0xFFFE packet from ESP32...",
+            fontSize = 13.5.sp,
             color = Color(0xFF475569),
             fontWeight = FontWeight.Medium
         )
         Text(
-            text = "Measuring physical signal strength (RSSI)[cite: 1, 2]",
-            fontSize = 12.sp,
+            text = "Running Trimmed Mean RSSI proximity filter[cite: 1, 2]",
+            fontSize = 11.5.sp,
             color = Color(0xFF94A3B8),
             modifier = Modifier.padding(top = 4.dp)
         )
     }
 }
 
-// ----------------------------------------------------
-// STEP 2: Face Liveness Viewfinder View[cite: 1, 2]
-// ----------------------------------------------------
 @Composable
-fun FaceLivenessView(rssi: Int, prompt: String) {
+fun FaceLivenessView(
+    rssi: Int,
+    token: Long,
+    onLivenessSuccess: () -> Unit
+) {
+    var livenessPrompt by remember { mutableStateOf("Position your face inside the oval[cite: 1, 2]") }
+
+    val faceAnalyzer = remember {
+        FaceLivenessAnalyzer(
+            onLivenessPassed = {
+                onLivenessSuccess()
+            },
+            onFaceStatusUpdate = { status ->
+                livenessPrompt = status
+            }
+        )
+    }
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // Beacon Found Badge
+        // Beacon Verified Tag
         Row(
             modifier = Modifier
                 .background(Color(0xFFDCFCE7), RoundedCornerShape(20.dp))
@@ -226,8 +428,8 @@ fun FaceLivenessView(rssi: Int, prompt: String) {
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Beacon Verified: $rssi dBm (Inside Room)[cite: 1, 2]",
-                fontSize = 12.sp,
+                text = "ESP32 Verified: $rssi dBm | Token: %06d".format(token),
+                fontSize = 11.5.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color(0xFF166534)
             )
@@ -247,60 +449,48 @@ fun FaceLivenessView(rssi: Int, prompt: String) {
             fontSize = 19.sp,
             fontWeight = FontWeight.ExtraBold,
             color = Color(0xFF0F172A),
-            modifier = Modifier.padding(top = 4.dp, bottom = 24.dp)
+            modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
         )
 
-        // Mock Camera Viewfinder with Oval Cutout
+        // Real CameraX Front Viewfinder with Oval Boundary Mask[cite: 1, 2]
         Box(
             modifier = Modifier
-                .width(220.dp)
-                .height(280.dp)
-                .background(Color(0xFF1E293B), RoundedCornerShape(110.dp))
-                .border(3.dp, Color(0xFF2563EB), RoundedCornerShape(110.dp)),
+                .width(230.dp)
+                .height(290.dp)
+                .clip(RoundedCornerShape(115.dp))
+                .border(3.dp, Color(0xFF2563EB), RoundedCornerShape(115.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Default.Face,
-                    contentDescription = null,
-                    tint = Color(0xFF94A3B8),
-                    modifier = Modifier.size(72.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Camera Preview Area",
-                    color = Color(0xFF64748B),
-                    fontSize = 11.sp
-                )
-            }
+            CameraViewfinder(
+                modifier = Modifier.fillMaxSize(),
+                analyzer = faceAnalyzer
+            )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
-        // Dynamic Interactive Prompt Chip
+        // Dynamic Interactive Challenge Chip
         Card(
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)),
             border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFDBEAFE))
         ) {
             Text(
-                text = prompt,
+                text = livenessPrompt,
                 color = Color(0xFF1E40AF),
                 fontWeight = FontWeight.Bold,
-                fontSize = 13.5.sp,
+                fontSize = 13.sp,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
             )
         }
     }
 }
 
-// ----------------------------------------------------
-// STEP 3: Verification Receipt View[cite: 1, 2]
-// ----------------------------------------------------
 @Composable
 fun SuccessReceiptView(
     room: String,
-    rssi: Int,
+    rssi: Double,
+    token: Long,
     timestamp: String,
     onDone: () -> Unit
 ) {
@@ -308,7 +498,6 @@ fun SuccessReceiptView(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Success Icon
         Box(
             modifier = Modifier
                 .size(76.dp)
@@ -332,15 +521,14 @@ fun SuccessReceiptView(
             color = Color(0xFF0F172A)
         )
         Text(
-            text = "Verified via BeaconPass Secure Engine",
-            fontSize = 13.sp,
+            text = "Verified via BeaconPass Hardware Proximity[cite: 1, 2]",
+            fontSize = 12.sp,
             color = Color(0xFF64748B),
             modifier = Modifier.padding(top = 4.dp)
         )
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
-        // Transaction Receipt Card
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -349,17 +537,17 @@ fun SuccessReceiptView(
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
-                ReceiptRow("Session / Room", "$room (Computer Networks)")
-                Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 12.dp))
-                ReceiptRow("Recorded RSSI", "$rssi dBm (Strong Presence)[cite: 1, 2]")
-                Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 12.dp))
-                ReceiptRow("Facial Liveness", "Passed (Blink Verified)[cite: 1, 2]")
-                Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 12.dp))
-                ReceiptRow("Timestamp", timestamp)
+                ReceiptRow("Verified Room", "$room (Computer Networks)")
+                Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 10.dp))
+                ReceiptRow("Trimmed Mean RSSI", "%.1f dBm (Inside Boundary)".format(rssi))
+                Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 10.dp))
+                ReceiptRow("Dynamic Hash/Token", "%06d (Synchronized)".format(token))
+                Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 10.dp))
+                ReceiptRow("Capture Time", timestamp)
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(28.dp))
 
         Button(
             onClick = onDone,
@@ -369,12 +557,7 @@ fun SuccessReceiptView(
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
         ) {
-            Text(
-                text = "Back to Dashboard",
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-                color = Color.White
-            )
+            Text("Back to Dashboard", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.White)
         }
     }
 }
@@ -386,7 +569,7 @@ fun ReceiptRow(label: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = label, fontSize = 13.sp, color = Color(0xFF64748B))
-        Text(text = value, fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+        Text(text = label, fontSize = 12.5.sp, color = Color(0xFF64748B))
+        Text(text = value, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
     }
 }

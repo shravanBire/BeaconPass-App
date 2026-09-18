@@ -182,13 +182,13 @@ fun AttendanceProcessScreen(
                             currentState = AttendanceStepState.Submitting
 
                             scope.launch {
-                                // 1. Fetch live active session created by teacher
-                                val sessionResult = attendanceRepository.getActiveSession("CS-402")
+                                // Pehle teacher ka live active session dhoondo
+                                val sessionResult = attendanceRepository.getActiveSession()
 
-                                sessionResult.onSuccess { activeId ->
-                                    // 2. Submit attendance using dynamic active session ID
+                                sessionResult.onSuccess { liveSessionId ->
+                                    // Live ID ke sath server RPC submit karo
                                     val result = attendanceRepository.submitAttendance(
-                                        sessionId = activeId,
+                                        sessionId = liveSessionId,
                                         token = beacon.rotatingToken,
                                         rssi = beacon.trimmedRssi,
                                         deviceId = deviceFingerprint
@@ -211,22 +211,21 @@ fun AttendanceProcessScreen(
                                         }
                                     }.onFailure { error ->
                                         currentState = AttendanceStepState.ScanFailed(
-                                            title = "Submission Error",
-                                            message = error.localizedMessage ?: "Failed to record attendance.",
+                                            title = "Network Error",
+                                            message = error.localizedMessage ?: "Failed to reach Supabase server.",
                                             isOutOfBounds = false
                                         )
                                     }
-                                }.onFailure { noSessionError ->
+                                }.onFailure { noSession ->
                                     currentState = AttendanceStepState.ScanFailed(
                                         title = "No Active Session",
-                                        message = noSessionError.localizedMessage ?: "Teacher has not opened the attendance window yet.",
+                                        message = noSession.localizedMessage ?: "Teacher window is closed.",
                                         isOutOfBounds = false
                                     )
                                 }
                             }
                         }
                     )
-
                     is AttendanceStepState.Submitting -> SubmittingView()
 
                     is AttendanceStepState.SuccessReceipt -> SuccessReceiptView(

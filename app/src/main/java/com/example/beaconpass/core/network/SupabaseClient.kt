@@ -1,5 +1,6 @@
 package com.example.beaconpass.core.network
 
+import com.example.beaconpass.BuildConfig
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
@@ -11,8 +12,8 @@ import io.github.jan.supabase.realtime.realtime
 
 object SupabaseNetworkClient {
 
-    private const val SUPABASE_URL = ""
-    private const val SUPABASE_ANON_KEY = ""
+    private val SUPABASE_URL = BuildConfig.SUPABASE_URL
+    private val SUPABASE_ANON_KEY = BuildConfig.SUPABASE_ANON_KEY
 
     val client: SupabaseClient = createSupabaseClient(
         supabaseUrl = SUPABASE_URL,

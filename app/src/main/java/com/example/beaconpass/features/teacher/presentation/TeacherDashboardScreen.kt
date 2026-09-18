@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.beaconpass.core.ble.BleTeacherTrigger
 import kotlinx.coroutines.delay
 import com.example.beaconpass.features.teacher.data.TeacherRepository
 import kotlinx.coroutines.flow.collectLatest
@@ -56,6 +57,8 @@ fun TeacherDashboardScreen(
 
     val listState = rememberLazyListState()
     val attendedStudents = remember { mutableStateListOf<LiveStudentEntry>() }
+
+    val triggerHelper = remember { BleTeacherTrigger(context) }
 
     // Realtime WebSocket Collector: triggers when activeSessionId is set
     LaunchedEffect(activeSessionId) {
@@ -175,16 +178,25 @@ fun TeacherDashboardScreen(
                                 if (!isSessionActive) {
                                     isStartingSession = true
                                     scope.launch {
-                                        attendedStudents.clear()
-                                        val result = teacherRepository.startAttendanceSession(
-                                            durationSeconds = selectedDuration
-                                        )
-                                        isStartingSession = false
-                                        result.onSuccess { sessionId ->
-                                            activeSessionId = sessionId
-                                            isSessionActive = true
-                                        }.onFailure { error ->
-                                            Toast.makeText(context, "Error starting session: ${error.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                        // 1. First trigger ESP32 hardware via BLE GATT
+                                        val bleTriggerResult = triggerHelper.triggerEsp32(selectedDuration)
+
+                                        bleTriggerResult.onSuccess {
+                                            // 2. Once ESP32 starts broadcasting, create the Supabase Session
+                                            attendedStudents.clear()
+                                            val result = teacherRepository.startAttendanceSession(
+                                                durationSeconds = selectedDuration
+                                            )
+                                            isStartingSession = false
+                                            result.onSuccess { sessionId ->
+                                                activeSessionId = sessionId
+                                                isSessionActive = true
+                                            }.onFailure { error ->
+                                                Toast.makeText(context, "DB Error: ${error.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }.onFailure { bleError ->
+                                            isStartingSession = false
+                                            Toast.makeText(context, "Hardware Trigger Failed: ${bleError.localizedMessage}", Toast.LENGTH_LONG).show()
                                         }
                                     }
                                 } else {

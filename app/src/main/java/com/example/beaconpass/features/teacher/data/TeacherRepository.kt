@@ -1,10 +1,11 @@
 package com.example.beaconpass.features.teacher.data
 
+import android.util.Log
 import com.example.beaconpass.core.network.SupabaseNetworkClient
 import com.example.beaconpass.features.teacher.presentation.LiveStudentEntry
-import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.realtime.PostgresAction
+import io.github.jan.supabase.realtime.Realtime
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.decodeRecord
 import io.github.jan.supabase.realtime.postgresChangeFlow
@@ -42,11 +43,11 @@ class TeacherRepository {
 
     private val postgrest = SupabaseNetworkClient.postgrest
     private val realtime = SupabaseNetworkClient.realtime
+    private val TAG = "BEACON_TEACHER"
 
-    // 1. Create a dynamic active session with duration
     suspend fun startAttendanceSession(
-        courseId: String = "22222222-2222-2222-2222-222222222222", // CS-402
-        roomId: String = "11111111-1111-1111-1111-111111111111",   // Room 402
+        courseId: String = "22222222-2222-2222-2222-222222222222",
+        roomId: String = "11111111-1111-1111-1111-111111111111",
         durationSeconds: Int
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
@@ -66,12 +67,11 @@ class TeacherRepository {
             }
 
             postgrest.from("attendance_sessions").insert(sessionPayload)
+            Log.d(TAG, "Session created successfully in DB: $sessionId")
             sessionId
         }
     }
 
-    // 2. Stop/Close the active session
-    // 2. Stop/Close the active session
     suspend fun stopAttendanceSession(sessionId: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             postgrest.from("attendance_sessions").update(
@@ -83,41 +83,54 @@ class TeacherRepository {
                     eq("id", sessionId)
                 }
             }
-            Unit // Explicitly return Unit so runCatching evaluates to Result<Unit>
+            Log.d(TAG, "Session stopped: $sessionId")
+            Unit
         }
     }
 
-    // 3. Listen to incoming attendance records via Supabase Realtime WebSocket
     suspend fun subscribeToLiveAttendance(sessionId: String): Flow<LiveStudentEntry> {
-        val channel = realtime.channel("session_$sessionId")
+        val channel = realtime.channel("attendance_feed_$sessionId")
 
         val changeFlow = channel.postgresChangeFlow<PostgresAction.Insert>(schema = "public") {
             table = "attendance_records"
         }
 
+        // Connect and subscribe asynchronously without blocking the thread
+        if (realtime.status.value != Realtime.Status.CONNECTED) {
+            Log.d(TAG, "Connecting to Realtime WebSocket...")
+            realtime.connect()
+        }
+
         channel.subscribe()
+        Log.d(TAG, "Subscription requested for channel: attendance_feed_$sessionId")
 
         return changeFlow.mapNotNull { action ->
-            val record = action.decodeRecord<LiveAttendanceRecordDto>()
+            Log.d(TAG, "Realtime event raw received: $action")
+            try {
+                val record = action.decodeRecord<LiveAttendanceRecordDto>()
+                Log.d(TAG, "Decoded record session: ${record.sessionId}")
 
-            if (record.sessionId == sessionId) {
-                // Fetch student name & roll number from profiles
-                val student = postgrest.from("profiles")
-                    .select(columns = Columns.list("id", "name", "roll_no")) {
-                        filter {
-                            eq("id", record.studentId)
-                        }
-                    }.decodeSingleOrNull<StudentProfileDto>()
+                if (record.sessionId == sessionId) {
+                    val student = postgrest.from("profiles")
+                        .select(columns = Columns.list("id", "name", "roll_no")) {
+                            filter {
+                                eq("id", record.studentId)
+                            }
+                        }.decodeSingleOrNull<StudentProfileDto>()
 
-                val timeStr = record.verifiedAt.take(19).replace("T", " ")
+                    val timeStr = record.verifiedAt.take(19).replace("T", " ")
 
-                LiveStudentEntry(
-                    rollNo = student?.rollNo ?: "UNKNOWN",
-                    name = student?.name ?: "Student",
-                    timestamp = timeStr,
-                    rssi = record.rssiRecorded.toInt()
-                )
-            } else null
+                    LiveStudentEntry(
+                        rollNo = student?.rollNo ?: "UNKNOWN",
+                        name = student?.name ?: "Verified Student",
+                        timestamp = timeStr,
+                        rssi = record.rssiRecorded.toInt()
+                    )
+                } else null
+            } catch (e: Exception) {
+                Log.e(TAG, "Error mapping realtime record: ${e.message}", e)
+                null
+            }
         }.flowOn(Dispatchers.IO)
     }
 }

@@ -1,7 +1,17 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization") version "1.9.0"
+}
+
+val localProperties = Properties().apply {
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        load(FileInputStream(localFile))
+    }
 }
 
 android {
@@ -19,6 +29,9 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        buildConfigField("String", "SUPABASE_URL", "\"${localProperties.getProperty("SUPABASE_URL") ?: ""}\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${localProperties.getProperty("SUPABASE_ANON_KEY") ?: ""}\"")
     }
 
     buildTypes {
@@ -42,6 +55,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.1"
@@ -95,7 +109,7 @@ dependencies {
     implementation("io.github.jan-tennert.supabase:realtime-kt")
 
     // Ktor Engine required by Supabase SDK
-    implementation("io.ktor:ktor-client-android:2.3.12")
+    implementation("io.ktor:ktor-client-okhttp:2.3.12")
 
     // KotlinX Serialization JSON
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")

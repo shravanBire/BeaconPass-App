@@ -9,5 +9,8 @@ sealed class Screen(val route: String) {
     object TeacherDashboard : Screen("teacher_dashboard_screen/{facultyEmail}") {
         fun createRoute(facultyEmail: String) = "teacher_dashboard_screen/$facultyEmail"
     }
+    object FaceEnrollment : Screen("face_enrollment/{userId}") {
+        fun createRoute(userId: String) = "face_enrollment/$userId"
+    }
 }
 

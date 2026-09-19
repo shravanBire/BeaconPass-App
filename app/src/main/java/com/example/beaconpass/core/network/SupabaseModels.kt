@@ -21,9 +21,9 @@ data class UserProfile(
     @SerialName("roll_no") val rollNo: String,
     val name: String,
     val role: String,
-    @SerialName("device_id") val deviceId: String? = null
+    @SerialName("device_id") val deviceId: String? = null,
+    @SerialName("face_embedding") val faceEmbedding: List<Double>? = null
 )
-
 // Active Session model
 @Serializable
 data class SessionInfo(
@@ -33,3 +33,4 @@ data class SessionInfo(
     @SerialName("is_active") val isActive: Boolean,
     @SerialName("expires_at") val expiresAt: String
 )
+

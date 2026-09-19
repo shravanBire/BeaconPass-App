@@ -15,6 +15,7 @@ import androidx.navigation.navArgument
 import com.example.beaconpass.core.navigation.Screen
 import com.example.beaconpass.features.attendance.presentation.AttendanceProcessScreen
 import com.example.beaconpass.features.attendance.presentation.StudentDashboardScreen
+import com.example.beaconpass.features.auth.presentation.FaceEnrollmentScreen
 import com.example.beaconpass.features.auth.presentation.LoginScreen
 import com.example.beaconpass.features.teacher.presentation.TeacherDashboardScreen
 import com.example.beaconpass.ui.theme.BeaconPassTheme
@@ -33,6 +34,7 @@ class MainActivity : ComponentActivity() {
                     NavHost(
                         navController = navController,
                         startDestination = Screen.Login.route
+
                     ) {
                         // 1. Login Screen
                         composable(Screen.Login.route) {
@@ -43,9 +45,32 @@ class MainActivity : ComponentActivity() {
                                             popUpTo(Screen.Login.route) { inclusive = true }
                                         }
                                     } else {
-                                        navController.navigate(Screen.StudentDashboard.createRoute(profile.rollNo)) {
-                                            popUpTo(Screen.Login.route) { inclusive = true }
+                                        // Check if face embedding is already enrolled in DB
+                                        if (profile.faceEmbedding.isNullOrEmpty()) {
+                                            navController.navigate(Screen.FaceEnrollment.createRoute(profile.id)) {
+                                                popUpTo(Screen.Login.route) { inclusive = true }
+                                            }
+                                        } else {
+                                            navController.navigate(Screen.StudentDashboard.createRoute(profile.rollNo)) {
+                                                popUpTo(Screen.Login.route) { inclusive = true }
+                                            }
                                         }
+                                    }
+                                }
+                            )
+                        }
+
+                        composable(
+                            route = Screen.FaceEnrollment.route,
+                            arguments = listOf(navArgument("userId") { type = NavType.StringType })
+                        ) { backStackEntry ->
+                            val userId = backStackEntry.arguments?.getString("userId") ?: ""
+                            FaceEnrollmentScreen(
+                                userId = userId,
+                                onEnrollmentComplete = {
+                                    // Once enrolled, navigate to Student Dashboard
+                                    navController.navigate(Screen.StudentDashboard.createRoute("MyDashboard")) {
+                                        popUpTo(Screen.FaceEnrollment.route) { inclusive = true }
                                     }
                                 }
                             )

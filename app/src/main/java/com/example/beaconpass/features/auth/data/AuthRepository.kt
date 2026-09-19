@@ -20,9 +20,24 @@ class AuthRepository {
     private val auth = SupabaseNetworkClient.auth
     private val postgrest = SupabaseNetworkClient.postgrest
 
-    /**
-     * Supabase Email Auth + Hardware Keystore Device Lock verification.
-     */
+    suspend fun saveFaceEmbedding(userId: String, embedding: FloatArray): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val embeddingList = embedding.map { it.toDouble() }
+            postgrest.from("profiles").update(
+                buildJsonObject {
+                    put("face_embedding", kotlinx.serialization.json.JsonArray(
+                        embeddingList.map { kotlinx.serialization.json.JsonPrimitive(it) }
+                    ))
+                }
+            ) {
+                filter {
+                    eq("id", userId)
+                }
+            }
+            Unit
+        }
+    }
+
     suspend fun signInAndVerifyDevice(
         email: String,
         pass: String,
